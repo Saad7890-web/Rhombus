@@ -221,3 +221,78 @@ func DecodeMetadata(raw []byte) (map[string]any, error) {
 	}
 	return out, nil
 }
+
+func (r *OutboxRepository) ClaimBatch(
+	ctx context.Context,
+	workerID string,
+	limit int,
+	leaseDuration time.Duration,
+	now time.Time,
+) ([]outbox.Event, error) {
+	leaseUntil := now.Add(leaseDuration)
+
+	query := `
+		WITH claimed AS (
+			SELECT id
+			FROM rhombus_outbox
+			WHERE status IN ('PENDING', 'RETRY_WAIT')
+			  AND available_at <= $1
+			  AND (leased_until IS NULL OR leased_until < $1)
+			ORDER BY created_at ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT $2
+		)
+		UPDATE rhombus_outbox o
+		SET status = 'PROCESSING',
+			leased_by = $3,
+			leased_until = $4,
+			updated_at = NOW()
+		FROM claimed
+		WHERE o.id = claimed.id
+		RETURNING
+			o.id, o.tenant_id, o.aggregate_type, o.aggregate_id, o.ordering_key,
+			o.event_type, o.schema_version, o.payload, o.metadata, o.destination,
+			o.status, o.retry_count, o.last_error, o.available_at, o.leased_until,
+			o.leased_by, o.trace_id, o.correlation_id, o.idempotency_key,
+			o.created_at, o.updated_at, o.processed_at
+	`
+
+	rows, err := r.db.Pool.Query(ctx, query, now, limit, workerID, leaseUntil)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []outbox.Event
+	for rows.Next() {
+		var e outbox.Event
+		var tenantID, lastError, leasedBy, traceID, correlationID, idempotencyKey *string
+		var leasedUntil, processedAt *time.Time
+		var metadata, destination []byte
+
+		if err := rows.Scan(
+			&e.ID, &tenantID, &e.AggregateType, &e.AggregateID, &e.OrderingKey,
+			&e.EventType, &e.SchemaVersion, &e.Payload, &metadata, &destination,
+			&e.Status, &e.RetryCount, &lastError, &e.AvailableAt, &leasedUntil,
+			&leasedBy, &traceID, &correlationID, &idempotencyKey,
+			&e.CreatedAt, &e.UpdatedAt, &processedAt,
+		); err != nil {
+			return nil, err
+		}
+
+		e.TenantID = tenantID
+		e.Metadata = metadata
+		e.Destination = destination
+		e.LastError = lastError
+		e.LeasedUntil = leasedUntil
+		e.LeasedBy = leasedBy
+		e.TraceID = traceID
+		e.CorrelationID = correlationID
+		e.IdempotencyKey = idempotencyKey
+		e.ProcessedAt = processedAt
+
+		items = append(items, e)
+	}
+
+	return items, rows.Err()
+}
