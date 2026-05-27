@@ -2,27 +2,30 @@ package kafka
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"strconv"
 
 	"github.com/Saad7890-web/rhombus/internal/outbox"
 )
 
 type Processor struct {
-	producer Producer
+	producer      Producer
 	topicResolver func(e outbox.Event) (string, error)
 }
 
-func NewProcessor(p Producer, resolver func(e outbox.Event) (string, error)) *Processor {
+func NewProcessor(
+	p Producer,
+	resolver func(e outbox.Event) (string, error),
+) *Processor {
 	return &Processor{
-		producer: p,
+		producer:      p,
 		topicResolver: resolver,
 	}
 }
 
 func (p *Processor) Process(ctx context.Context, e outbox.Event) error {
 	if p.producer == nil {
-		return errors.New("kafka producer is nil")
+		return errors.New("producer is nil")
 	}
 
 	topic, err := p.topicResolver(e)
@@ -30,23 +33,29 @@ func (p *Processor) Process(ctx context.Context, e outbox.Event) error {
 		return err
 	}
 
-	key := []byte(e.OrderingKey)
-	value := e.Payload
-
 	headers := map[string]string{
-		"event_id":        e.ID,
-		"event_type":      e.EventType,
-		"aggregate_type":  e.AggregateType,
-		"aggregate_id":    e.AggregateID,
-		"schema_version":   string(rune(e.SchemaVersion)),
+		"event_id":       e.ID,
+		"event_type":     e.EventType,
+		"aggregate_type": e.AggregateType,
+		"aggregate_id":   e.AggregateID,
+		"schema_version": strconv.Itoa(e.SchemaVersion),
 	}
 
-	if len(e.Metadata) > 0 {
-		var meta map[string]any
-		if err := json.Unmarshal(e.Metadata, &meta); err == nil {
-			_ = meta
-		}
+	if e.TraceID != nil {
+		headers["trace_id"] = *e.TraceID
+	}
+	if e.CorrelationID != nil {
+		headers["correlation_id"] = *e.CorrelationID
+	}
+	if e.IdempotencyKey != nil {
+		headers["idempotency_key"] = *e.IdempotencyKey
 	}
 
-	return p.producer.Produce(ctx, topic, key, value, headers)
+	return p.producer.Produce(
+		ctx,
+		topic,
+		[]byte(e.OrderingKey),
+		e.Payload,
+		headers,
+	)
 }
