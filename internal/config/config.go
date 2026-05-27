@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -23,18 +24,17 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		DatabaseURL:     os.Getenv("DATABASE_URL"),
 		KafkaClientID:   getenv("KAFKA_CLIENT_ID", "rhombus"),
-		KafkaTopicPrefix: os.Getenv("KAFKA_TOPIC_PREFIX"),
+		KafkaTopicPrefix: getenv("KAFKA_TOPIC_PREFIX", ""),
 		WorkerID:        getenv("WORKER_ID", "worker-1"),
+		BatchSize:       getenvInt("BATCH_SIZE", 100),
+		PollInterval:    getenvDuration("POLL_INTERVAL", 2*time.Second),
+		LeaseDuration:   getenvDuration("LEASE_DURATION", 30*time.Second),
+		MaxRetries:      getenvInt("MAX_RETRIES", 5),
 	}
 
 	if brokers := os.Getenv("KAFKA_BROKERS"); brokers != "" {
 		cfg.KafkaBrokers = strings.Split(brokers, ",")
 	}
-
-	cfg.BatchSize = getenvInt("BATCH_SIZE", 100)
-	cfg.PollInterval = getenvDuration("POLL_INTERVAL", 2*time.Second)
-	cfg.LeaseDuration = getenvDuration("LEASE_DURATION", 30*time.Second)
-	cfg.MaxRetries = getenvInt("MAX_RETRIES", 5)
 
 	if cfg.DatabaseURL == "" {
 		return nil, errors.New("DATABASE_URL is required")
@@ -54,9 +54,25 @@ func getenv(key, fallback string) string {
 }
 
 func getenvInt(key string, fallback int) int {
-	return fallback
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
 }
 
 func getenvDuration(key string, fallback time.Duration) time.Duration {
-	return fallback
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fallback
+	}
+	return d
 }
