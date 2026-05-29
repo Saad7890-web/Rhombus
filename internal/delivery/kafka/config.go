@@ -14,7 +14,7 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		RequiredAcks:    -1, // all replicas
+		RequiredAcks:    -1, 
 		BatchTimeout:    10 * time.Millisecond,
 		Async:           false,
 		AllowAutoCreate: false,
