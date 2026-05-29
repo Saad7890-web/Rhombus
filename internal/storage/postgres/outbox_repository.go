@@ -296,3 +296,19 @@ func (r *OutboxRepository) ClaimBatch(
 
 	return items, rows.Err()
 }
+
+func (r *OutboxRepository) ResetStaleLeases(ctx context.Context, before time.Time) error {
+	query := `
+		UPDATE rhombus_outbox
+		SET status = 'RETRY_WAIT',
+			leased_until = NULL,
+			leased_by = NULL,
+			available_at = NOW(),
+			updated_at = NOW()
+		WHERE status = 'PROCESSING'
+		  AND leased_until IS NOT NULL
+		  AND leased_until < $1
+	`
+	_, err := r.db.Pool.Exec(ctx, query, before)
+	return err
+}

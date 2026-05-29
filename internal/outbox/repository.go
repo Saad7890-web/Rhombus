@@ -12,4 +12,5 @@ type Repository interface {
 	MarkDelivered(ctx context.Context, id string) error
 	MarkRetryWait(ctx context.Context, id string, retryCount int, availableAt time.Time, lastError string) error
 	MoveToDLQ(ctx context.Context, id string, lastError string) error
+	ResetStaleLeases(ctx context.Context, before time.Time) error
 }
