@@ -2,6 +2,8 @@ package tests
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -15,16 +17,21 @@ import (
 )
 
 func TestSegmentioProducer_ProduceAndConsume(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
 	brokersEnv := os.Getenv("KAFKA_BROKERS")
 	require.NotEmpty(t, brokersEnv, "KAFKA_BROKERS is required for Kafka integration tests")
 
 	brokers := strings.Split(brokersEnv, ",")
+	require.NotEmpty(t, brokers)
+
+	err := waitForTCP(ctx, brokers[0], 60*time.Second)
+	require.NoError(t, err)
+
 	topic := "rhombus-test-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 
-	err := createTopic(ctx, brokers[0], topic)
+	err = createTopicWithRetry(ctx, brokers[0], topic)
 	require.NoError(t, err)
 
 	producer, err := kafkadelivery.NewSegmentioProducer(kafkadelivery.Config{
@@ -72,16 +79,61 @@ func TestSegmentioProducer_ProduceAndConsume(t *testing.T) {
 	require.True(t, foundEventType, "event_type header missing")
 }
 
-func createTopic(ctx context.Context, broker string, topic string) error {
-	conn, err := segmentio.Dial("tcp", broker)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
+func waitForTCP(ctx context.Context, addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
 
-	return conn.CreateTopics(segmentio.TopicConfig{
-		Topic:             topic,
-		NumPartitions:     1,
-		ReplicationFactor: 1,
-	})
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		lastErr = err
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1 * time.Second):
+		}
+	}
+
+	return fmt.Errorf("tcp not ready at %s: %w", addr, lastErr)
+}
+
+func createTopicWithRetry(ctx context.Context, broker string, topic string) error {
+	deadline := time.Now().Add(45 * time.Second)
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		conn, err := segmentio.Dial("tcp", broker)
+		if err != nil {
+			lastErr = err
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(1 * time.Second):
+			}
+			continue
+		}
+
+		lastErr = conn.CreateTopics(segmentio.TopicConfig{
+			Topic:             topic,
+			NumPartitions:     1,
+			ReplicationFactor: 1,
+		})
+		_ = conn.Close()
+
+		if lastErr == nil {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1 * time.Second):
+		}
+	}
+
+	return fmt.Errorf("failed to create topic %s after retrying: %w", topic, lastErr)
 }
