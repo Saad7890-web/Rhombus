@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/segmentio/kafka-go"
+	segmentio "github.com/segmentio/kafka-go"
 )
 
 type SegmentioProducer struct {
-	writers map[string]*kafka.Writer
+	writers map[string]*segmentio.Writer
 	cfg     Config
 }
 
@@ -18,37 +18,31 @@ func NewSegmentioProducer(cfg Config) (*SegmentioProducer, error) {
 	if len(cfg.Brokers) == 0 {
 		return nil, errors.New("kafka brokers are required")
 	}
-
 	if cfg.ClientID == "" {
 		cfg.ClientID = "rhombus"
 	}
-
 	if cfg.BatchTimeout <= 0 {
 		cfg.BatchTimeout = 10 * time.Millisecond
 	}
 
 	return &SegmentioProducer{
-		writers: make(map[string]*kafka.Writer),
+		writers: make(map[string]*segmentio.Writer),
 		cfg:     cfg,
 	}, nil
 }
 
-func (p *SegmentioProducer) getWriter(topic string) *kafka.Writer {
+func (p *SegmentioProducer) getWriter(topic string) *segmentio.Writer {
 	if w, ok := p.writers[topic]; ok {
 		return w
 	}
 
-	w := &kafka.Writer{
-		Addr:         kafka.TCP(p.cfg.Brokers...),
+	w := &segmentio.Writer{
+		Addr:         segmentio.TCP(p.cfg.Brokers...),
 		Topic:        topic,
-		Balancer:     &kafka.Hash{},
-		RequiredAcks: kafka.RequiredAcks(p.cfg.RequiredAcks),
+		Balancer:     &segmentio.Hash{},
+		RequiredAcks: segmentio.RequireAll,
 		Async:        p.cfg.Async,
 		BatchTimeout: p.cfg.BatchTimeout,
-		Transport: &kafka.Transport{
-			ClientID: p.cfg.ClientID,
-		},
-		AllowAutoTopicCreation: p.cfg.AllowAutoCreate,
 	}
 
 	p.writers[topic] = w
@@ -62,28 +56,26 @@ func (p *SegmentioProducer) Produce(
 	value []byte,
 	headers map[string]string,
 ) error {
-
 	if topic == "" {
 		return errors.New("topic is required")
 	}
 
-	msgHeaders := make([]kafka.Header, 0, len(headers))
+	msgHeaders := make([]segmentio.Header, 0, len(headers))
 	for k, v := range headers {
-		msgHeaders = append(msgHeaders, kafka.Header{
+		msgHeaders = append(msgHeaders, segmentio.Header{
 			Key:   k,
 			Value: []byte(v),
 		})
 	}
 
-	msg := kafka.Message{
+	msg := segmentio.Message{
 		Key:     key,
 		Value:   value,
 		Headers: msgHeaders,
 		Time:    time.Now().UTC(),
 	}
 
-	writer := p.getWriter(topic)
-	return writer.WriteMessages(ctx, msg)
+	return p.getWriter(topic).WriteMessages(ctx, msg)
 }
 
 func (p *SegmentioProducer) Close() error {
