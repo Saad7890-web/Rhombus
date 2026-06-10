@@ -9,6 +9,7 @@ import (
 	"github.com/Saad7890-web/rhombus/internal/outbox"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type OutboxRepository struct {
@@ -19,7 +20,11 @@ func NewOutboxRepository(db *DB) *OutboxRepository {
 	return &OutboxRepository{db: db}
 }
 
-func (r *OutboxRepository) Insert(ctx context.Context, e *outbox.Event) error {
+type execer interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
+func normalizeEvent(e *outbox.Event) error {
 	if e == nil {
 		return errors.New("event is nil")
 	}
@@ -40,15 +45,30 @@ func (r *OutboxRepository) Insert(ctx context.Context, e *outbox.Event) error {
 	}
 	e.UpdatedAt = time.Now().UTC()
 
-	metadata := e.Metadata
-	if len(metadata) == 0 {
-		metadata = []byte(`{}`)
+	if len(e.Metadata) == 0 {
+		e.Metadata = []byte(`{}`)
 	}
-	destination := e.Destination
-	if len(destination) == 0 {
-		destination = []byte(`{}`)
+	if len(e.Destination) == 0 {
+		e.Destination = []byte(`{}`)
 	}
+	return nil
+}
 
+func (r *OutboxRepository) Insert(ctx context.Context, e *outbox.Event) error {
+	if err := normalizeEvent(e); err != nil {
+		return err
+	}
+	return insertOutbox(ctx, r.db.Pool, e)
+}
+
+func (r *OutboxRepository) InsertTx(ctx context.Context, tx pgx.Tx, e *outbox.Event) error {
+	if err := normalizeEvent(e); err != nil {
+		return err
+	}
+	return insertOutbox(ctx, tx, e)
+}
+
+func insertOutbox(ctx context.Context, exec execer, e *outbox.Event) error {
 	query := `
 		INSERT INTO rhombus_outbox (
 			id, tenant_id, aggregate_type, aggregate_id, ordering_key,
@@ -65,17 +85,17 @@ func (r *OutboxRepository) Insert(ctx context.Context, e *outbox.Event) error {
 		)
 	`
 
-	_, err := r.db.Pool.Exec(ctx, query, pgx.NamedArgs{
+	_, err := exec.Exec(ctx, query, pgx.NamedArgs{
 		"id":              e.ID,
 		"tenant_id":       e.TenantID,
 		"aggregate_type":  e.AggregateType,
 		"aggregate_id":    e.AggregateID,
-		"ordering_key":     e.OrderingKey,
+		"ordering_key":    e.OrderingKey,
 		"event_type":      e.EventType,
 		"schema_version":  e.SchemaVersion,
 		"payload":         e.Payload,
-		"metadata":        metadata,
-		"destination":     destination,
+		"metadata":        e.Metadata,
+		"destination":     e.Destination,
 		"status":          e.Status,
 		"retry_count":     e.RetryCount,
 		"last_error":      e.LastError,
