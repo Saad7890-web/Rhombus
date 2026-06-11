@@ -7,6 +7,7 @@ import (
 
 	"github.com/Saad7890-web/rhombus/internal/observability"
 	"github.com/Saad7890-web/rhombus/internal/outbox"
+	"github.com/Saad7890-web/rhombus/internal/retry"
 )
 
 type Repository interface {
@@ -148,6 +149,21 @@ func (w *Worker) handleEvent(ctx context.Context, e outbox.Event) error {
 			"worker_id":      w.workerID,
 			"error":          err.Error(),
 		})
+	}
+
+	if !retry.IsRetryable(err) {
+		if w.obs != nil {
+			w.obs.IncDLQMoved()
+			w.obs.Log(ctx, "error", "event moved to dlq", map[string]any{
+				"event_id":       e.ID,
+				"aggregate_type": e.AggregateType,
+				"aggregate_id":   e.AggregateID,
+				"event_type":     e.EventType,
+				"worker_id":      w.workerID,
+				"error":          err.Error(),
+			})
+		}
+		return w.repo.MoveToDLQ(ctx, e.ID, err.Error())
 	}
 
 	nextRetryCount := e.RetryCount + 1
