@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Saad7890-web/rhombus/internal/observability"
 	"github.com/Saad7890-web/rhombus/internal/replay"
 	"github.com/Saad7890-web/rhombus/internal/server"
 	"github.com/Saad7890-web/rhombus/internal/storage/postgres"
@@ -32,10 +33,13 @@ func main() {
 	db := postgres.NewDB(pool)
 	cfg := server.LoadConfig()
 
+	obs := observability.New(cfg.ServiceName)
+
 	srv, err := server.New(cfg, db)
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}
+	srv.SetObserver(obs)
 
 	replaySvc, err := replay.New(postgres.NewOutboxRepository(db))
 	if err != nil {

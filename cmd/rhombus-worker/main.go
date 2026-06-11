@@ -3,15 +3,18 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Saad7890-web/rhombus/internal/config"
 	kafkadelivery "github.com/Saad7890-web/rhombus/internal/delivery/kafka"
 	"github.com/Saad7890-web/rhombus/internal/dispatcher"
+	"github.com/Saad7890-web/rhombus/internal/observability"
 	"github.com/Saad7890-web/rhombus/internal/outbox"
 	"github.com/Saad7890-web/rhombus/internal/storage/postgres"
 )
@@ -33,6 +36,19 @@ func main() {
 
 	db := postgres.NewDB(pool)
 	repo := postgres.NewOutboxRepository(db)
+
+	obs := observability.New("rhombus-worker")
+
+	metricsAddr := os.Getenv("METRICS_ADDR")
+	if metricsAddr == "" {
+		metricsAddr = ":9091"
+	}
+	go func() {
+		log.Printf("metrics listening on %s", metricsAddr)
+		if err := http.ListenAndServe(metricsAddr, obs.MetricsHandler()); err != nil && err != http.ErrServerClosed {
+			log.Printf("metrics server stopped: %v", err)
+		}
+	}()
 
 	producerCfg := kafkadelivery.DefaultConfig()
 	producerCfg.Brokers = cfg.KafkaBrokers
@@ -64,6 +80,7 @@ func main() {
 		cfg.LeaseDuration,
 		cfg.MaxRetries,
 	)
+	worker.SetObserver(obs)
 
 	log.Println("rhombus-worker starting...")
 
@@ -71,5 +88,6 @@ func main() {
 		log.Fatalf("worker stopped: %v", err)
 	}
 
+	time.Sleep(250 * time.Millisecond)
 	log.Println("rhombus-worker shutdown complete")
 }
