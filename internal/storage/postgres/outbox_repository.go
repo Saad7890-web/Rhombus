@@ -217,8 +217,99 @@ func (r *OutboxRepository) MarkRetryWait(ctx context.Context, id string, retryCo
 	return err
 }
 
-func (r *OutboxRepository) MoveToDLQ(ctx context.Context, id string, lastError string) error {
-	query := `
+func (r *OutboxRepository) MoveToDLQ(ctx context.Context, id string, lastError string) (err error) {
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	var e outbox.Event
+	var tenantID, leasedBy, traceID, correlationID, idempotencyKey *string
+	var lastErrorFromRow *string
+	var leasedUntil, processedAt *time.Time
+	var metadata, destination []byte
+
+	row := tx.QueryRow(ctx, `
+		SELECT
+			id, tenant_id, aggregate_type, aggregate_id, ordering_key,
+			event_type, schema_version, payload, metadata, destination,
+			status, retry_count, last_error, available_at, leased_until,
+			leased_by, trace_id, correlation_id, idempotency_key,
+			created_at, updated_at, processed_at
+		FROM rhombus_outbox
+		WHERE id = $1
+		FOR UPDATE
+	`, id)
+
+	err = row.Scan(
+		&e.ID, &tenantID, &e.AggregateType, &e.AggregateID, &e.OrderingKey,
+		&e.EventType, &e.SchemaVersion, &e.Payload, &metadata, &destination,
+		&e.Status, &e.RetryCount, &lastErrorFromRow, &e.AvailableAt, &leasedUntil,
+		&leasedBy, &traceID, &correlationID, &idempotencyKey,
+		&e.CreatedAt, &e.UpdatedAt, &processedAt,
+	)
+	if err != nil {
+		return err
+	}
+
+	e.TenantID = tenantID
+	e.Metadata = metadata
+	e.Destination = destination
+	e.LastError = lastErrorFromRow
+	e.LeasedUntil = leasedUntil
+	e.LeasedBy = leasedBy
+	e.TraceID = traceID
+	e.CorrelationID = correlationID
+	e.IdempotencyKey = idempotencyKey
+	e.ProcessedAt = processedAt
+
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO rhombus_dlq (
+			event_id, tenant_id, aggregate_type, aggregate_id, ordering_key,
+			event_type, schema_version, payload, metadata, destination,
+			retry_count, last_error, stack_trace, worker_id, original_status,
+			created_at, moved_to_dlq_at, replayed_at
+		) VALUES (
+			$1, $2, $3, $4, $5,
+			$6, $7, $8, $9, $10,
+			$11, $12, $13, $14, $15,
+			$16, NOW(), NULL
+		)
+		ON CONFLICT (event_id) DO UPDATE
+		SET
+			retry_count = EXCLUDED.retry_count,
+			last_error = EXCLUDED.last_error,
+			stack_trace = EXCLUDED.stack_trace,
+			worker_id = EXCLUDED.worker_id,
+			original_status = EXCLUDED.original_status,
+			moved_to_dlq_at = NOW()
+	`,
+		e.ID,
+		e.TenantID,
+		e.AggregateType,
+		e.AggregateID,
+		e.OrderingKey,
+		e.EventType,
+		e.SchemaVersion,
+		e.Payload,
+		e.Metadata,
+		e.Destination,
+		e.RetryCount,
+		lastError,
+		nil,
+		e.LeasedBy,
+		string(e.Status),
+		e.CreatedAt,
+	); err != nil {
+		return err
+	}
+
+	if _, err = tx.Exec(ctx, `
 		UPDATE rhombus_outbox
 		SET status = 'DLQ',
 			last_error = $2,
@@ -226,8 +317,11 @@ func (r *OutboxRepository) MoveToDLQ(ctx context.Context, id string, lastError s
 			leased_by = NULL,
 			updated_at = NOW()
 		WHERE id = $1
-	`
-	_, err := r.db.Pool.Exec(ctx, query, id, lastError)
+	`, id, lastError); err != nil {
+		return err
+	}
+
+	err = tx.Commit(ctx)
 	return err
 }
 

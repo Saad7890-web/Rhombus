@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Saad7890-web/rhombus/internal/outbox"
+	"github.com/Saad7890-web/rhombus/internal/retry"
 )
 
 type Repository interface {
@@ -23,6 +24,7 @@ type Worker struct {
 	pollInterval  time.Duration
 	leaseDuration time.Duration
 	maxRetries    int
+	retryPolicy   retry.Policy
 }
 
 func NewWorker(
@@ -34,6 +36,10 @@ func NewWorker(
 	leaseDuration time.Duration,
 	maxRetries int,
 ) *Worker {
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+
 	return &Worker{
 		workerID:      workerID,
 		repo:          repo,
@@ -42,6 +48,7 @@ func NewWorker(
 		pollInterval:  pollInterval,
 		leaseDuration: leaseDuration,
 		maxRetries:    maxRetries,
+		retryPolicy:   retry.DefaultPolicy(),
 	}
 }
 
@@ -85,19 +92,15 @@ func (w *Worker) handleEvent(ctx context.Context, e outbox.Event) error {
 		return w.repo.MarkDelivered(ctx, e.ID)
 	}
 
+	if !retry.IsRetryable(err) {
+		return w.repo.MoveToDLQ(ctx, e.ID, err.Error())
+	}
+
 	nextRetryCount := e.RetryCount + 1
 	if nextRetryCount > w.maxRetries {
 		return w.repo.MoveToDLQ(ctx, e.ID, err.Error())
 	}
 
-	availableAt := time.Now().UTC().Add(backoff(nextRetryCount))
+	availableAt := w.retryPolicy.NextAvailableAt(nextRetryCount, time.Now().UTC())
 	return w.repo.MarkRetryWait(ctx, e.ID, nextRetryCount, availableAt, err.Error())
-}
-
-func backoff(retryCount int) time.Duration {
-	if retryCount < 1 {
-		retryCount = 1
-	}
-	base := time.Second
-	return time.Duration(1<<uint(retryCount-1)) * base
 }
