@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Saad7890-web/rhombus/internal/observability"
 	"github.com/Saad7890-web/rhombus/internal/replay"
 )
 
@@ -18,6 +19,7 @@ type Pinger interface {
 type Server struct {
 	cfg    Config
 	pinger Pinger
+	obs    *observability.Collector
 	mux    *http.ServeMux
 	http   *http.Server
 }
@@ -52,15 +54,20 @@ func New(cfg Config, pinger Pinger) (*Server, error) {
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/readyz", s.handleReadyz)
 	mux.HandleFunc("/version", s.handleVersion)
+	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/", s.handleRoot)
 
 	s.http = &http.Server{
 		Addr:              cfg.Address,
-		Handler:           loggingMiddleware(mux),
+		Handler:           s,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	return s, nil
+}
+
+func (s *Server) SetObserver(obs *observability.Collector) {
+	s.obs = obs
 }
 
 func (s *Server) MountReplay(h *replay.Handler) {
@@ -68,6 +75,26 @@ func (s *Server) MountReplay(h *replay.Handler) {
 		return
 	}
 	h.Register(s.mux)
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	handler := http.Handler(s.mux)
+	if s.obs != nil {
+		handler = s.obsRequestMiddleware(handler)
+	}
+	handler.ServeHTTP(w, r)
+}
+
+func (s *Server) obsRequestMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		traceID := r.Header.Get("X-Request-Id")
+		if traceID == "" {
+			traceID = r.Header.Get("traceparent")
+		}
+		ctx := observability.WithTraceID(r.Context(), traceID)
+		r = r.WithContext(ctx)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) ListenAndServe() error {
@@ -97,6 +124,12 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := s.pinger.Ping(ctx); err != nil {
+		if s.obs != nil {
+			s.obs.IncDBError()
+			s.obs.Log(r.Context(), "error", "readiness failed", map[string]any{
+				"error": err.Error(),
+			})
+		}
 		writeJSON(w, http.StatusServiceUnavailable, readyResponse{
 			Status: "not-ready",
 			DB:     "down",
@@ -119,6 +152,16 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if s.obs == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error": "observability not configured",
+		})
+		return
+	}
+	s.obs.MetricsHandler().ServeHTTP(w, r)
+}
+
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -135,12 +178,6 @@ func writeJSON(w http.ResponseWriter, statusCode int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(v)
-}
-
-func loggingMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
-	})
 }
 
 func (s *Server) String() string {
