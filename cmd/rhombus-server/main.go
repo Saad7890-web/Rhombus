@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Saad7890-web/rhombus/internal/replay"
 	"github.com/Saad7890-web/rhombus/internal/server"
 	"github.com/Saad7890-web/rhombus/internal/storage/postgres"
 )
@@ -35,6 +36,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}
+
+	replaySvc, err := replay.New(postgres.NewOutboxRepository(db))
+	if err != nil {
+		log.Fatalf("failed to create replay service: %v", err)
+	}
+	srv.MountReplay(replay.NewHandler(replaySvc))
 
 	go func() {
 		log.Printf("%s listening on %s", srv.String(), cfg.Address)

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/Saad7890-web/rhombus/internal/replay"
 )
 
 type Pinger interface {
@@ -59,6 +61,13 @@ func New(cfg Config, pinger Pinger) (*Server, error) {
 	}
 
 	return s, nil
+}
+
+func (s *Server) MountReplay(h *replay.Handler) {
+	if s == nil || h == nil {
+		return
+	}
+	h.Register(s.mux)
 }
 
 func (s *Server) ListenAndServe() error {
