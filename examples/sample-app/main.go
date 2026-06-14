@@ -13,9 +13,9 @@ import (
 )
 
 type CreateOrderRequest struct {
-	ID           string `json:"id"`
-	CustomerID    string `json:"customer_id"`
-	AmountCents   int64  `json:"amount_cents"`
+	ID          string `json:"id"`
+	CustomerID  string `json:"customer_id"`
+	AmountCents int64  `json:"amount_cents"`
 }
 
 type CreateOrderResponse struct {
@@ -70,7 +70,17 @@ func main() {
 			return
 		}
 
-		err := client.WithTransaction(r.Context(), func(tx *rhombus.Transaction) error {
+		payload, err := json.Marshal(map[string]any{
+			"order_id":     req.ID,
+			"customer_id":  req.CustomerID,
+			"amount_cents": req.AmountCents,
+		})
+		if err != nil {
+			http.Error(w, "failed to build payload", http.StatusInternalServerError)
+			return
+		}
+
+		err = client.WithTransaction(r.Context(), func(tx *rhombus.Transaction) error {
 			_, err := tx.Exec(
 				`INSERT INTO orders (id, customer_id, amount_cents) VALUES ($1, $2, $3)`,
 				req.ID,
@@ -87,12 +97,10 @@ func main() {
 				OrderingKey:   req.ID,
 				EventType:     "orders.created",
 				SchemaVersion: 1,
-				Payload: []byte(
-					`{"order_id":"` + req.ID + `","customer_id":"` + req.CustomerID + `","amount_cents":` + itoa(req.AmountCents) + `}`,
-				),
-				Metadata:    []byte(`{"source":"sample-app"}`),
-				Destination: []byte(`{"kafka":{"topic":"orders.created"}}`),
-				AvailableAt: time.Now().UTC(),
+				Payload:       payload,
+				Metadata:      []byte(`{"source":"sample-app"}`),
+				Destination:   []byte(`{"kafka":{"topic":"orders.created"}}`),
+				AvailableAt:   time.Now().UTC(),
 			})
 		})
 		if err != nil {
@@ -131,8 +139,4 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-func itoa(v int64) string {
-	return json.Number(string(rune(0))).String()
 }
