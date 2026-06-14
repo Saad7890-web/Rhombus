@@ -7,6 +7,7 @@ import (
 
 	"github.com/Saad7890-web/rhombus/internal/storage/postgres"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -61,6 +62,25 @@ func (c *Client) BeginTransactionWithOptions(ctx context.Context, opts pgx.TxOpt
 	}, nil
 }
 
+func (c *Client) WithTransaction(ctx context.Context, fn func(tx *Transaction) error) (err error) {
+	tx, err := c.BeginTransaction(ctx)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		if !tx.closed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
 func (c *Client) EnqueueEvent(ctx context.Context, tx pgx.Tx, event *Event) error {
 	if c == nil || c.repo == nil {
 		return errors.New("client is not initialized")
@@ -85,6 +105,33 @@ func (t *Transaction) EnqueueEvent(event *Event) error {
 		return errors.New("event is nil")
 	}
 	return t.repo.InsertTx(t.ctx, t.tx, event)
+}
+
+func (t *Transaction) Exec(query string, args ...any) (pgconn.CommandTag, error) {
+	if t == nil {
+		return pgconn.CommandTag{}, errors.New("transaction is nil")
+	}
+	if t.closed {
+		return pgconn.CommandTag{}, errors.New("transaction is already closed")
+	}
+	return t.tx.Exec(t.ctx, query, args...)
+}
+
+func (t *Transaction) QueryRow(query string, args ...any) pgx.Row {
+	if t == nil {
+		return nil
+	}
+	return t.tx.QueryRow(t.ctx, query, args...)
+}
+
+func (t *Transaction) Query(query string, args ...any) (pgx.Rows, error) {
+	if t == nil {
+		return nil, errors.New("transaction is nil")
+	}
+	if t.closed {
+		return nil, errors.New("transaction is already closed")
+	}
+	return t.tx.Query(t.ctx, query, args...)
 }
 
 func (t *Transaction) Commit() error {
